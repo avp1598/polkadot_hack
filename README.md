@@ -30,7 +30,11 @@ bun run dev
 
 See `contracts/README.md`.
 
-Quick path: deploy `contracts/ConsentVaultRegistry.sol` in `https://remix.polkadot.io/` using an injected wallet on Polkadot Hub TestNet, then paste the deployed address into the app.
+App is hardcoded to:
+
+`0x6D438d562900Fd8e71950776F70DAE52e850306C`
+
+If you redeploy the contract, update `frontend/src/App.tsx`.
 
 ## Demo Flow
 

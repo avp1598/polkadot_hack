@@ -31,6 +31,8 @@ bun run build
 
 ## Contract Setup
 
-1. Deploy `contracts/ConsentVaultRegistry.sol` (see `../contracts/README.md`)
-2. Copy deployed address
-3. Paste address into **Registry contract address** inside the app
+The app is hardcoded to this deployed registry:
+
+`0x6D438d562900Fd8e71950776F70DAE52e850306C`
+
+If you want to switch contracts, edit `src/App.tsx`.

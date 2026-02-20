@@ -1,4 +1,4 @@
-import { type ChangeEvent, useEffect, useState } from 'react'
+import { type ChangeEvent, useState } from 'react'
 import {
   BrowserProvider,
   Contract,
@@ -7,9 +7,11 @@ import {
   type Eip1193Provider,
 } from 'ethers'
 
-const STORAGE_KEY = 'consent-vault.encrypted-v1'
-const CONTRACT_ADDRESS_KEY = 'consent-vault.contract-address'
+const STORAGE_KEY_PREFIX = 'consent-vault.encrypted-v1'
+const GUEST_PROFILE_ID = 'guest'
 const PBKDF2_ITERATIONS = 240_000
+const CONSENT_VAULT_REGISTRY_ADDRESS = '0x6D438d562900Fd8e71950776F70DAE52e850306C'
+const WALLET_CALL_TIMEOUT_MS = 30_000
 
 const POLKADOT_HUB_TESTNET = {
   name: 'polkadot-hub-testnet',
@@ -121,6 +123,12 @@ const formatDateTime = (isoDate: string): string =>
     timeStyle: 'short',
   })
 
+const normalizeProfileId = (address: string | null): string =>
+  address ? address.toLowerCase() : GUEST_PROFILE_ID
+
+const getStorageKey = (profileId: string): string =>
+  `${STORAGE_KEY_PREFIX}:${profileId}`
+
 const deriveAesKey = async (
   passphrase: string,
   salt: Uint8Array,
@@ -224,39 +232,100 @@ const isValidEnvelope = (value: unknown): value is EncryptedVaultEnvelope => {
   )
 }
 
+const withTimeout = async <T,>(
+  promise: Promise<T>,
+  timeoutMessage: string,
+  timeoutMs = WALLET_CALL_TIMEOUT_MS,
+): Promise<T> => {
+  let timeoutId: number | null = null
+
+  const timeoutPromise = new Promise<T>((_, reject) => {
+    timeoutId = window.setTimeout(() => {
+      reject(new Error(timeoutMessage))
+    }, timeoutMs)
+  })
+
+  try {
+    return await Promise.race([promise, timeoutPromise])
+  } finally {
+    if (timeoutId !== null) {
+      window.clearTimeout(timeoutId)
+    }
+  }
+}
+
+const getProviderErrorCode = (error: unknown): number | null => {
+  if (typeof error === 'object' && error !== null && 'code' in error) {
+    const code = (error as { code?: unknown }).code
+    if (typeof code === 'number') {
+      return code
+    }
+  }
+  return null
+}
+
+const tryPromptAccountSelection = async (
+  ethereum: Eip1193Provider,
+): Promise<void> => {
+  try {
+    await withTimeout(
+      ethereum.request({
+        method: 'wallet_requestPermissions',
+        params: [{ eth_accounts: {} }],
+      }),
+      'Timed out while opening wallet account permissions.',
+      15_000,
+    )
+  } catch (error) {
+    const code = getProviderErrorCode(error)
+    // Unsupported method or user skip: continue with eth_requestAccounts fallback.
+    if (code === -32601 || code === 4001) {
+      return
+    }
+  }
+}
+
 const ensureHubNetwork = async (ethereum: Eip1193Provider): Promise<void> => {
   try {
-    await ethereum.request({
-      method: 'wallet_switchEthereumChain',
-      params: [{ chainId: POLKADOT_HUB_TESTNET.chainIdHex }],
-    })
-  } catch (error) {
-    const chainMissing =
-      typeof error === 'object' &&
-      error !== null &&
-      'code' in error &&
-      (error as { code?: number }).code === 4902
+    await withTimeout(
+      ethereum.request({
+        method: 'wallet_switchEthereumChain',
+        params: [{ chainId: POLKADOT_HUB_TESTNET.chainIdHex }],
+      }),
+      'Timed out while switching wallet network.',
+    )
+  } catch (switchError) {
+    const code = getProviderErrorCode(switchError)
+    const switchMessage =
+      switchError instanceof Error ? switchError.message.toLowerCase() : ''
+    const shouldTryAddChain =
+      code === 4902 ||
+      switchMessage.includes('unrecognized chain') ||
+      switchMessage.includes('unknown chain')
 
-    if (!chainMissing) {
-      throw error
+    if (!shouldTryAddChain) {
+      throw switchError
     }
 
-    await ethereum.request({
-      method: 'wallet_addEthereumChain',
-      params: [
-        {
-          chainId: POLKADOT_HUB_TESTNET.chainIdHex,
-          chainName: POLKADOT_HUB_TESTNET.name,
-          rpcUrls: [POLKADOT_HUB_TESTNET.rpcUrl],
-          nativeCurrency: {
-            name: 'DOT',
-            symbol: 'DOT',
-            decimals: 18,
+    await withTimeout(
+      ethereum.request({
+        method: 'wallet_addEthereumChain',
+        params: [
+          {
+            chainId: POLKADOT_HUB_TESTNET.chainIdHex,
+            chainName: POLKADOT_HUB_TESTNET.name,
+            rpcUrls: [POLKADOT_HUB_TESTNET.rpcUrl],
+            nativeCurrency: {
+              name: 'DOT',
+              symbol: 'DOT',
+              decimals: 18,
+            },
+            blockExplorerUrls: [POLKADOT_HUB_TESTNET.blockExplorerUrl],
           },
-          blockExplorerUrls: [POLKADOT_HUB_TESTNET.blockExplorerUrl],
-        },
-      ],
-    })
+        ],
+      }),
+      'Timed out while adding Polkadot Hub TestNet to wallet.',
+    )
   }
 }
 
@@ -282,44 +351,53 @@ function App() {
   const [isBusy, setIsBusy] = useState(false)
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
   const [labelInput, setLabelInput] = useState('')
-  const [notesInput, setNotesInput] = useState('')
   const [pendingConsent, setPendingConsent] = useState<PendingConsent | null>(null)
   const [isConsentBusy, setIsConsentBusy] = useState(false)
   const [walletAddress, setWalletAddress] = useState<string | null>(null)
-  const [contractAddress, setContractAddress] = useState(
-    () => localStorage.getItem(CONTRACT_ADDRESS_KEY) ?? '',
-  )
+  const [activeProfileId, setActiveProfileId] = useState<string>(GUEST_PROFILE_ID)
   const [verificationMap, setVerificationMap] = useState<
     Record<string, VerificationResult>
   >({})
   const [hasEncryptedVault, setHasEncryptedVault] = useState(
-    () => localStorage.getItem(STORAGE_KEY) !== null,
+    () => localStorage.getItem(getStorageKey(GUEST_PROFILE_ID)) !== null,
   )
+  const activeStorageKey = getStorageKey(activeProfileId)
 
-  useEffect(() => {
-    if (contractAddress.trim()) {
-      localStorage.setItem(CONTRACT_ADDRESS_KEY, contractAddress.trim())
-    } else {
-      localStorage.removeItem(CONTRACT_ADDRESS_KEY)
-    }
-  }, [contractAddress])
+  const resetUnlockedSession = (): void => {
+    setVault(null)
+    setSessionPassphrase('')
+    setUnlockPassphrase('')
+    setVerificationMap({})
+  }
+
+  const switchProfile = (profileId: string, message: string): void => {
+    const storageKey = getStorageKey(profileId)
+    const hasVault = localStorage.getItem(storageKey) !== null
+    setActiveProfileId(profileId)
+    resetUnlockedSession()
+    setHasEncryptedVault(hasVault)
+    setStatusMessage(
+      `${message} ${
+        hasVault
+          ? 'Vault found for this profile. Unlock it with that profile passphrase.'
+          : 'No vault for this profile yet. Create one.'
+      }`,
+    )
+  }
 
   const persistVault = async (nextVault: VaultPayload): Promise<void> => {
     if (!sessionPassphrase) {
       throw new Error('Vault is locked. Unlock it before saving.')
     }
     const encrypted = await encryptVault(nextVault, sessionPassphrase)
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(encrypted))
+    localStorage.setItem(activeStorageKey, JSON.stringify(encrypted))
     setHasEncryptedVault(true)
     setVault(nextVault)
   }
 
   const lockVault = (): void => {
-    setVault(null)
-    setSessionPassphrase('')
-    setWalletAddress(null)
-    setUnlockPassphrase('')
-    setVerificationMap({})
+    resetUnlockedSession()
+    setHasEncryptedVault(localStorage.getItem(activeStorageKey) !== null)
     setStatusMessage('Vault locked. Data remains encrypted at rest.')
   }
 
@@ -337,7 +415,7 @@ function App() {
     try {
       const freshVault: VaultPayload = { version: 1, entries: [] }
       const encrypted = await encryptVault(freshVault, createPassphrase)
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(encrypted))
+      localStorage.setItem(activeStorageKey, JSON.stringify(encrypted))
       setVault(freshVault)
       setHasEncryptedVault(true)
       setSessionPassphrase(createPassphrase)
@@ -356,7 +434,7 @@ function App() {
   }
 
   const unlockVault = async (): Promise<void> => {
-    const rawEncrypted = localStorage.getItem(STORAGE_KEY)
+    const rawEncrypted = localStorage.getItem(activeStorageKey)
     if (!rawEncrypted) {
       setStatusMessage('No encrypted vault found. Create one first.')
       return
@@ -407,7 +485,7 @@ function App() {
         mimeType: selectedFile.type || 'application/octet-stream',
         byteSize: selectedFile.size,
         hashHex: await hashFileContents(contents),
-        notes: notesInput.trim(),
+        notes: '',
         contentBase64: bytesToBase64(contentBytes),
         createdAt: new Date().toISOString(),
       }
@@ -419,7 +497,6 @@ function App() {
       await persistVault(nextVault)
       setSelectedFile(null)
       setLabelInput('')
-      setNotesInput('')
       setStatusMessage(
         `Saved "${entry.label}" locally. Hash ${entry.hashHex.slice(0, 12)}... is ready for optional notarization.`,
       )
@@ -456,7 +533,7 @@ function App() {
   }
 
   const exportVault = (): void => {
-    const rawEncrypted = localStorage.getItem(STORAGE_KEY)
+    const rawEncrypted = localStorage.getItem(activeStorageKey)
     if (!rawEncrypted) {
       setStatusMessage('No vault data to export.')
       return
@@ -480,9 +557,9 @@ function App() {
       if (!isValidEnvelope(parsed)) {
         throw new Error('Imported file is not a valid encrypted vault export.')
       }
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(parsed))
+      localStorage.setItem(activeStorageKey, JSON.stringify(parsed))
       setHasEncryptedVault(true)
-      lockVault()
+      resetUnlockedSession()
       setStatusMessage('Encrypted vault imported. Unlock it with its passphrase.')
     } catch (error) {
       setStatusMessage(
@@ -495,22 +572,41 @@ function App() {
   }
 
   const requestConsent = (request: PendingConsent): void => {
+    if (isConsentBusy) {
+      setStatusMessage('Please finish the current external action first.')
+      return
+    }
     setPendingConsent(request)
   }
 
-  const approveConsent = async (): Promise<void> => {
-    if (!pendingConsent) return
+  const disconnectWallet = (): void => {
+    if (!walletAddress) return
+    setWalletAddress(null)
+    switchProfile(
+      GUEST_PROFILE_ID,
+      'Wallet disconnected. Switched to guest vault profile.',
+    )
+  }
+
+  const approveConsent = (): void => {
+    if (!pendingConsent || isConsentBusy) return
+    const approvedRequest = pendingConsent
+    setPendingConsent(null)
     setIsConsentBusy(true)
-    try {
-      await pendingConsent.run()
-      setPendingConsent(null)
-    } catch (error) {
-      setStatusMessage(
-        `External action failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
-      )
-    } finally {
-      setIsConsentBusy(false)
-    }
+    setStatusMessage('Executing approved external action...')
+    void (async () => {
+      try {
+        await approvedRequest.run()
+      } catch (error) {
+        setStatusMessage(
+          `External action failed: ${
+            error instanceof Error ? error.message : 'Unknown error'
+          }`,
+        )
+      } finally {
+        setIsConsentBusy(false)
+      }
+    })()
   }
 
   const connectWallet = (): void => {
@@ -523,13 +619,25 @@ function App() {
       ],
       run: async () => {
         const ethereum = getEthereumProvider()
-        await ensureHubNetwork(ethereum)
         const browserProvider = new BrowserProvider(ethereum)
-        await browserProvider.send('eth_requestAccounts', [])
+        await tryPromptAccountSelection(ethereum)
+        setStatusMessage('Waiting for wallet account approval...')
+        await withTimeout(
+          browserProvider.send('eth_requestAccounts', []),
+          'Wallet connect request timed out. Check your wallet pop-up.',
+        )
+        setStatusMessage('Ensuring Polkadot Hub TestNet in wallet...')
+        await ensureHubNetwork(ethereum)
         const signer = await browserProvider.getSigner()
         const address = await signer.getAddress()
         setWalletAddress(address)
-        setStatusMessage(`Wallet connected: ${address}`)
+        const profileId = normalizeProfileId(address)
+        if (profileId === activeProfileId) {
+          setHasEncryptedVault(localStorage.getItem(getStorageKey(profileId)) !== null)
+          setStatusMessage(`Wallet connected: ${address}`)
+          return
+        }
+        switchProfile(profileId, `Wallet connected: ${address}. Switched to wallet vault profile.`)
       },
     })
   }
@@ -544,16 +652,13 @@ function App() {
       ],
       run: async () => {
         if (!vault) throw new Error('Unlock the vault first.')
-        if (!contractAddress.trim()) {
-          throw new Error('Set a deployed ConsentVaultRegistry contract address first.')
-        }
 
         const ethereum = getEthereumProvider()
         await ensureHubNetwork(ethereum)
         const browserProvider = new BrowserProvider(ethereum)
         const signer = await browserProvider.getSigner()
 
-        const registry = getRegistryContract(contractAddress.trim(), signer)
+        const registry = getRegistryContract(CONSENT_VAULT_REGISTRY_ADDRESS, signer)
         const tx = await registry.notarize(entry.hashHex, entry.label)
         setStatusMessage(`Transaction submitted: ${tx.hash}`)
         const receipt = await tx.wait()
@@ -581,20 +686,16 @@ function App() {
       title: 'Verify hash from Polkadot Hub',
       details: [
         `Query hash: ${entry.hashHex}`,
-        `Contract: ${contractAddress.trim() || 'not set'}`,
+        `Contract: ${CONSENT_VAULT_REGISTRY_ADDRESS}`,
         'This performs a read-only RPC call to Polkadot Hub TestNet.',
       ],
       run: async () => {
-        if (!contractAddress.trim()) {
-          throw new Error('Set a deployed ConsentVaultRegistry contract address first.')
-        }
-
         const provider = new JsonRpcProvider(POLKADOT_HUB_TESTNET.rpcUrl, {
           chainId: POLKADOT_HUB_TESTNET.chainId,
           name: POLKADOT_HUB_TESTNET.name,
         })
 
-        const registry = getRegistryContract(contractAddress.trim(), provider)
+        const registry = getRegistryContract(CONSENT_VAULT_REGISTRY_ADDRESS, provider)
         const recordsRaw = await registry.getRecords(entry.hashHex)
         const records: VerificationRecord[] = recordsRaw.map(
           (record: { submitter: string; timestamp: bigint; label: string }) => ({
@@ -636,6 +737,8 @@ function App() {
       <p className="helper">
         Files are encrypted locally with AES-GCM. We never store passphrases or upload
         documents automatically.
+        <br />
+        Active profile: <code>{activeProfileId}</code>
       </p>
 
       {hasEncryptedVault ? (
@@ -704,7 +807,21 @@ function App() {
         <section className="panel status-panel">
           <h2>Runtime Status</h2>
           <p>{statusMessage}</p>
+          <p className="helper">
+            Registry: <code>{CONSENT_VAULT_REGISTRY_ADDRESS}</code>
+            <br />
+            Wallet:{' '}
+            <strong>{walletAddress ?? 'not connected'}</strong>
+            <br />
+            Profile: <code>{activeProfileId}</code>
+          </p>
           <div className="status-actions">
+            <button onClick={connectWallet}>
+              {walletAddress ? 'Switch Wallet' : 'Connect Wallet'}
+            </button>
+            <button onClick={disconnectWallet} disabled={!walletAddress}>
+              Disconnect Wallet
+            </button>
             <button onClick={lockVault} disabled={!vault}>
               Lock
             </button>
@@ -723,35 +840,12 @@ function App() {
         {vault && (
           <>
             <section className="panel">
-              <h2>Trust Layer Setup</h2>
-              <p className="helper">
-                Polkadot Hub TestNet configuration from docs: RPC{' '}
-                <code>{POLKADOT_HUB_TESTNET.rpcUrl}</code>, chainId{' '}
-                <code>{POLKADOT_HUB_TESTNET.chainId}</code>.
-              </p>
-              <div className="field-grid">
-                <label className="field">
-                  <span>Registry contract address</span>
-                  <input
-                    type="text"
-                    value={contractAddress}
-                    onChange={(event) => setContractAddress(event.target.value)}
-                    placeholder="0x..."
-                  />
-                </label>
-                <button onClick={connectWallet}>Connect Wallet</button>
-              </div>
-              <p className="helper">
-                Connected wallet:{' '}
-                <strong>{walletAddress ?? 'not connected yet'}</strong>
-              </p>
-            </section>
-
-            <section className="panel">
               <h2>Add Document</h2>
               <p className="helper">
-                Added files are encrypted in your browser storage. Only hash + label can be
-                notarized on-chain after explicit approval.
+                Wallet: <strong>{walletAddress ?? 'not connected yet'}</strong>
+                <br />
+                Network: <code>{POLKADOT_HUB_TESTNET.name}</code> (
+                <code>{POLKADOT_HUB_TESTNET.chainId}</code>)
               </p>
               <div className="field-grid">
                 <label className="field">
@@ -768,15 +862,6 @@ function App() {
                     value={labelInput}
                     onChange={(event) => setLabelInput(event.target.value)}
                     placeholder="Vaccination proof, ID, invoice..."
-                  />
-                </label>
-                <label className="field field-wide">
-                  <span>Private notes</span>
-                  <textarea
-                    rows={3}
-                    value={notesInput}
-                    onChange={(event) => setNotesInput(event.target.value)}
-                    placeholder="Notes stay encrypted locally."
                   />
                 </label>
                 <button className="btn-strong" disabled={isBusy} onClick={() => void addEntry()}>
@@ -860,7 +945,7 @@ function App() {
               ))}
             </ul>
             <div className="consent-actions">
-              <button onClick={() => setPendingConsent(null)} disabled={isConsentBusy}>
+              <button onClick={() => setPendingConsent(null)}>
                 Decline
               </button>
               <button

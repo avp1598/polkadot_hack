@@ -12,11 +12,39 @@ cd frontend && bun run dev
 
 ---
 
+## The Network Effect Argument (the real moat — say this last)
+
+This is how TruthMark actually wins:
+
+> *"Right now, when a deepfake surfaces, the burden of proof is on the victim — they have to prove it's fake. TruthMark flips that completely."*
+
+> *"The moment influential people — politicians, journalists, CEOs, athletes — start notarizing their content as a habit, the trust equation inverts. An unnotarized video from a public figure becomes the suspicious one. People will ask: 'why didn't they notarize it?' The absence of a TruthMark becomes the red flag."*
+
+> *"It's the same reason we trust HTTPS. Nobody decided every site must use it. But once enough important sites did, HTTP became the thing you didn't trust."*
+
+**This is a social protocol, not just a technical tool.** The more public figures adopt it, the more unnotarized content gets treated as unverified — by default.
+
+The endgame: platforms, newsrooms, and legal systems start requiring TruthMark proofs for any content disputed as a deepfake. At that point, creating a deepfake of a notarized public figure's content isn't just ineffective — it's immediately, verifiably, publicly false.
+
 ## The Hook (say this out loud)
 
 > *"It's 2026. You're a public figure. You just recorded your official statement on a breaking story. 72 hours later, a deepfake surfaces — showing you saying the exact opposite. How do you prove what was real?"*
 
 ---
+
+## The Network Effect Argument (the real moat — say this last)
+
+This is how TruthMark actually wins:
+
+> *"Right now, when a deepfake surfaces, the burden of proof is on the victim — they have to prove it's fake. TruthMark flips that completely."*
+
+> *"The moment influential people — politicians, journalists, CEOs, athletes — start notarizing their content as a habit, the trust equation inverts. An unnotarized video from a public figure becomes the suspicious one. People will ask: 'why didn't they notarize it?' The absence of a TruthMark becomes the red flag."*
+
+> *"It's the same reason we trust HTTPS. Nobody decided every site must use it. But once enough important sites did, HTTP became the thing you didn't trust."*
+
+**This is a social protocol, not just a technical tool.** The more public figures adopt it, the more unnotarized content gets treated as unverified — by default.
+
+The endgame: platforms, newsrooms, and legal systems start requiring TruthMark proofs for any content disputed as a deepfake. At that point, creating a deepfake of a notarized public figure's content isn't just ineffective — it's immediately, verifiably, publicly false.
 
 ## Step 1 — Vault is local, nothing leaves your machine
 
@@ -74,6 +102,22 @@ Then scroll to **Public Hash Verifier**:
 | No file uploaded anywhere | Only the hash is public — file stays private |
 
 > *"TruthMark doesn't fight deepfakes with AI. It fights them with cryptographic proof that pre-dates them."*
+
+---
+
+## The Network Effect Argument (the real moat — say this last)
+
+This is how TruthMark actually wins:
+
+> *"Right now, when a deepfake surfaces, the burden of proof is on the victim — they have to prove it's fake. TruthMark flips that completely."*
+
+> *"The moment influential people — politicians, journalists, CEOs, athletes — start notarizing their content as a habit, the trust equation inverts. An unnotarized video from a public figure becomes the suspicious one. People will ask: 'why didn't they notarize it?' The absence of a TruthMark becomes the red flag."*
+
+> *"It's the same reason we trust HTTPS. Nobody decided every site must use it. But once enough important sites did, HTTP became the thing you didn't trust."*
+
+**This is a social protocol, not just a technical tool.** The more public figures adopt it, the more unnotarized content gets treated as unverified — by default.
+
+The endgame: platforms, newsrooms, and legal systems start requiring TruthMark proofs for any content disputed as a deepfake. At that point, creating a deepfake of a notarized public figure's content isn't just ineffective — it's immediately, verifiably, publicly false.
 
 ---
 

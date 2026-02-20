@@ -6,6 +6,7 @@ import {
   type ContractRunner,
   type Eip1193Provider,
 } from 'ethers'
+import { z } from 'zod'
 
 const STORAGE_KEY_PREFIX = 'consent-vault.encrypted-v1'
 const GUEST_PROFILE_ID = 'guest'
@@ -28,6 +29,13 @@ const CONSENT_VAULT_ABI = [
   'function isNotarized(bytes32 hash) external view returns (bool)',
 ] as const
 
+const contentTypeSchema = z.enum(['video', 'audio', 'image', 'document', 'statement'])
+type ContentType = z.infer<typeof contentTypeSchema>
+
+const hexHashSchema = z
+  .string()
+  .regex(/^0x[\da-fA-F]{64}$/, 'Must be a 0x-prefixed 64-hex-character hash (66 chars total)')
+
 type VaultEntry = {
   id: string
   label: string
@@ -40,6 +48,7 @@ type VaultEntry = {
   createdAt: string
   lastNotarizedTx?: string
   lastNotarizedAt?: string
+  contentType?: ContentType
 }
 
 type VaultPayload = {
@@ -341,6 +350,17 @@ const getRegistryContract = (
   runner: ContractRunner,
 ): Contract => new Contract(contractAddress, CONSENT_VAULT_ABI, runner)
 
+const getContentTypeBadgeClass = (type: ContentType): string => {
+  const map: Record<ContentType, string> = {
+    video: 'badge--blue',
+    audio: 'badge--muted',
+    image: 'badge--green',
+    document: 'badge--amber',
+    statement: 'badge--red',
+  }
+  return map[type]
+}
+
 function App() {
   const [vault, setVault] = useState<VaultPayload | null>(null)
   const [sessionPassphrase, setSessionPassphrase] = useState('')
@@ -351,6 +371,7 @@ function App() {
   const [isBusy, setIsBusy] = useState(false)
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
   const [labelInput, setLabelInput] = useState('')
+  const [contentTypeInput, setContentTypeInput] = useState<ContentType>('document')
   const [pendingConsent, setPendingConsent] = useState<PendingConsent | null>(null)
   const [isConsentBusy, setIsConsentBusy] = useState(false)
   const [walletAddress, setWalletAddress] = useState<string | null>(null)
@@ -361,6 +382,11 @@ function App() {
   const [hasEncryptedVault, setHasEncryptedVault] = useState(
     () => localStorage.getItem(getStorageKey(GUEST_PROFILE_ID)) !== null,
   )
+  const [publicVerifierHash, setPublicVerifierHash] = useState('')
+  const [publicVerifierResult, setPublicVerifierResult] = useState<VerificationResult | null>(null)
+  const [isPublicVerifying, setIsPublicVerifying] = useState(false)
+  const [copiedEntryId, setCopiedEntryId] = useState<string | null>(null)
+
   const activeStorageKey = getStorageKey(activeProfileId)
 
   const resetUnlockedSession = (): void => {
@@ -488,6 +514,7 @@ function App() {
         notes: '',
         contentBase64: bytesToBase64(contentBytes),
         createdAt: new Date().toISOString(),
+        contentType: contentTypeInput,
       }
 
       const nextVault: VaultPayload = {
@@ -497,6 +524,7 @@ function App() {
       await persistVault(nextVault)
       setSelectedFile(null)
       setLabelInput('')
+      setContentTypeInput('document')
       setStatusMessage(
         `Saved "${entry.label}" locally. Hash ${entry.hashHex.slice(0, 12)}... is ready for optional notarization.`,
       )
@@ -722,6 +750,57 @@ function App() {
     })
   }
 
+  const verifyPublicHash = async (): Promise<void> => {
+    const parseResult = hexHashSchema.safeParse(publicVerifierHash.trim())
+    if (!parseResult.success) {
+      setStatusMessage(
+        `Invalid hash: ${parseResult.error.issues[0]?.message ?? 'Invalid format'}`,
+      )
+      return
+    }
+
+    setIsPublicVerifying(true)
+    try {
+      const provider = new JsonRpcProvider(POLKADOT_HUB_TESTNET.rpcUrl, {
+        chainId: POLKADOT_HUB_TESTNET.chainId,
+        name: POLKADOT_HUB_TESTNET.name,
+      })
+
+      const registry = getRegistryContract(CONSENT_VAULT_REGISTRY_ADDRESS, provider)
+      const recordsRaw = await registry.getRecords(parseResult.data)
+      const records: VerificationRecord[] = recordsRaw.map(
+        (record: { submitter: string; timestamp: bigint; label: string }) => ({
+          submitter: record.submitter,
+          timestamp: Number(record.timestamp),
+          label: record.label,
+        }),
+      )
+
+      setPublicVerifierResult({
+        checkedAt: new Date().toISOString(),
+        records,
+      })
+
+      setStatusMessage(
+        records.length > 0
+          ? `Public verification: ${records.length} record(s) found on-chain.`
+          : 'Public verification: no on-chain records found for this hash.',
+      )
+    } catch (error) {
+      setStatusMessage(
+        `Verification failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
+      )
+    } finally {
+      setIsPublicVerifying(false)
+    }
+  }
+
+  const copyHash = (entry: VaultEntry): void => {
+    void navigator.clipboard.writeText(entry.hashHex)
+    setCopiedEntryId(entry.id)
+    setTimeout(() => setCopiedEntryId(null), 2000)
+  }
+
   const downloadEntry = (entry: VaultEntry): void => {
     saveFile(
       entry.originalFilename,
@@ -786,20 +865,17 @@ function App() {
 
   return (
     <div className="app">
-      <div className="background-shape background-shape-one" />
-      <div className="background-shape background-shape-two" />
-
       <header className="hero">
-        <p className="eyebrow">PromptOff Prototype · Survival & Security</p>
-        <h1>Consent Vault</h1>
+        <p className="eyebrow">TruthMark · AI Content Provenance · Polkadot Hub</p>
+        <h1>TruthMark</h1>
         <p className="subtitle">
-          Local-first encrypted document vault with explicit consent for every outside
-          interaction. Polkadot Hub anchors authenticity with on-chain hash notarization.
+          Pre-notarize authentic video, audio, images, and statements on Polkadot.
+          If a deepfake surfaces, the on-chain timestamp proves the real content existed first.
         </p>
         <div className="inline-badges">
-          <span>Private by default</span>
-          <span>User-approved network calls</span>
-          <span>Owned and portable</span>
+          <span className="badge badge--muted">Zero-upload proof</span>
+          <span className="badge badge--muted">On-chain timestamp</span>
+          <span className="badge badge--muted">Deepfake defense</span>
         </div>
       </header>
 
@@ -849,6 +925,22 @@ function App() {
               </p>
               <div className="field-grid">
                 <label className="field">
+                  <span>Content type</span>
+                  <select
+                    value={contentTypeInput}
+                    onChange={(event) => {
+                      const parsed = contentTypeSchema.safeParse(event.target.value)
+                      if (parsed.success) setContentTypeInput(parsed.data)
+                    }}
+                  >
+                    <option value="video">Video</option>
+                    <option value="audio">Audio</option>
+                    <option value="image">Image</option>
+                    <option value="document">Document</option>
+                    <option value="statement">Statement</option>
+                  </select>
+                </label>
+                <label className="field">
                   <span>Choose file</span>
                   <input
                     type="file"
@@ -861,7 +953,7 @@ function App() {
                     type="text"
                     value={labelInput}
                     onChange={(event) => setLabelInput(event.target.value)}
-                    placeholder="Vaccination proof, ID, invoice..."
+                    placeholder="Interview footage, press statement..."
                   />
                 </label>
                 <button className="btn-strong" disabled={isBusy} onClick={() => void addEntry()}>
@@ -878,21 +970,68 @@ function App() {
                 <div className="entry-grid">
                   {vault.entries.map((entry) => {
                     const verification = verificationMap[entry.id]
+                    const isNotarized = Boolean(entry.lastNotarizedTx)
+                    const isVerified = Boolean(verification)
+                    const hasRecords = isVerified && verification.records.length > 0
+
+                    let cardClass: string
+                    if (!isNotarized) {
+                      cardClass = 'card--unverified'
+                    } else if (isVerified && hasRecords) {
+                      cardClass = 'card--authentic'
+                    } else {
+                      cardClass = 'card--pending'
+                    }
+
+                    let statusBadgeClass: string
+                    let statusBadgeText: string
+                    if (isNotarized && isVerified && hasRecords) {
+                      statusBadgeClass = 'badge--green'
+                      statusBadgeText = 'AUTHENTIC'
+                    } else if (isVerified && !hasRecords) {
+                      statusBadgeClass = 'badge--red'
+                      statusBadgeText = 'NO RECORD'
+                    } else if (isNotarized) {
+                      statusBadgeClass = 'badge--amber'
+                      statusBadgeText = 'ON-CHAIN PENDING'
+                    } else {
+                      statusBadgeClass = 'badge--muted'
+                      statusBadgeText = 'UNVERIFIED'
+                    }
+
+                    const contentType = entry.contentType ?? 'document'
+                    const contentTypeBadgeClass = getContentTypeBadgeClass(contentType)
+
                     return (
-                      <article key={entry.id} className="entry-card">
-                        <h3>{entry.label}</h3>
+                      <article key={entry.id} className={`entry-card ${cardClass}`}>
+                        <div className="entry-card-header">
+                          <h3>{entry.label}</h3>
+                          <div className="entry-badges">
+                            <span className={`badge ${contentTypeBadgeClass}`}>
+                              {contentType.toUpperCase()}
+                            </span>
+                            <span className={`badge ${statusBadgeClass}`}>
+                              {statusBadgeText}
+                            </span>
+                          </div>
+                        </div>
                         <p className="entry-meta">
                           {entry.originalFilename} · {formatBytes(entry.byteSize)} ·{' '}
                           {formatDateTime(entry.createdAt)}
                         </p>
-                        <p className="entry-hash">
-                          <span>SHA-256</span>
+                        <div className="entry-hash">
+                          <div className="entry-hash-header">
+                            <span>SHA-256</span>
+                            <button className="btn-copy" onClick={() => copyHash(entry)}>
+                              {copiedEntryId === entry.id ? 'COPIED' : 'COPY'}
+                            </button>
+                          </div>
                           <code>{entry.hashHex}</code>
-                        </p>
+                        </div>
                         {entry.notes ? <p className="entry-notes">{entry.notes}</p> : null}
 
                         <div className="entry-actions">
-                          <button onClick={() => downloadEntry(entry)}>Download Local Copy</button>
+                          <button onClick={() => downloadEntry(entry)}>Download</button>
                           <button onClick={() => verifyEntry(entry)}>Verify On-Chain</button>
                           <button className="btn-strong" onClick={() => notarizeEntry(entry)}>
                             Notarize Hash
@@ -904,7 +1043,7 @@ function App() {
 
                         {entry.lastNotarizedTx ? (
                           <p className="entry-proof">
-                            Last notarized {entry.lastNotarizedAt ? formatDateTime(entry.lastNotarizedAt) : ''}
+                            Notarized {entry.lastNotarizedAt ? formatDateTime(entry.lastNotarizedAt) : ''}
                             {' · '}
                             <code>{entry.lastNotarizedTx}</code>
                           </p>
@@ -932,12 +1071,55 @@ function App() {
             </section>
           </>
         )}
+
+        <section className="panel panel--verifier">
+          <h2>Public Hash Verifier</h2>
+          <p className="helper">
+            Verify any content hash on-chain — no wallet required.
+          </p>
+          <div className="field-grid">
+            <label className="field field-wide">
+              <span>Content hash</span>
+              <input
+                type="text"
+                placeholder="0x..."
+                value={publicVerifierHash}
+                onChange={(event) => setPublicVerifierHash(event.target.value)}
+              />
+            </label>
+            <button
+              className="btn-strong"
+              onClick={() => void verifyPublicHash()}
+              disabled={isPublicVerifying}
+            >
+              {isPublicVerifying ? 'Verifying...' : 'Verify Hash'}
+            </button>
+          </div>
+          {publicVerifierResult ? (
+            <div className="verification-block">
+              <p>
+                Checked {formatDateTime(publicVerifierResult.checkedAt)} ·{' '}
+                {publicVerifierResult.records.length} record(s)
+              </p>
+              {publicVerifierResult.records.length === 0 ? (
+                <p>No on-chain records found for this hash.</p>
+              ) : (
+                publicVerifierResult.records.map((record, index) => (
+                  <p key={`${record.submitter}-${record.timestamp}-${index}`}>
+                    {record.label || '(no label)'} · {record.submitter} ·{' '}
+                    {new Date(record.timestamp * 1000).toLocaleString()}
+                  </p>
+                ))
+              )}
+            </div>
+          ) : null}
+        </section>
       </main>
 
       {pendingConsent ? (
         <div className="consent-backdrop">
-          <div className="consent-modal">
-            <p className="eyebrow">External Interaction Request</p>
+          <div className="consent-modal consent-modal--dramatic">
+            <p className="eyebrow eyebrow--danger">Authorization Required</p>
             <h3>{pendingConsent.title}</h3>
             <ul>
               {pendingConsent.details.map((detail) => (
